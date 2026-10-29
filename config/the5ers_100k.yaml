@@ -1,0 +1,47 @@
+# Regras REAIS lidas da conta via API The5ers em 2026-10-29.
+# Conta: meta-trader-5 · …6821  |  Programa: "$100K High Stakes 10%"
+# Fonte: the5ers_program(operation=rules) + the5ers_consistency(operation=list)
+# NAO EDITE a mao: rode `python scripts/sync_rules.py` para reconfirmar na API.
+
+program:
+  name: "$100K High Stakes 10%"
+  phase: "evaluation"
+  step: 1
+  total_steps_in_phase: 2
+  platform: "meta-trader-5"
+  currency: "USD"
+
+account:
+  initial_balance: 100000.0
+
+rules:
+  # value/unit exatamente como a API devolve
+  profit_target:    { value: 10000.0, unit: "currency" }
+  max_daily_loss:   { value: 4.0,     unit: "percent"  }
+  max_total_loss:   { value: 8000.0,  unit: "currency" }
+
+consistency:
+  profitable_days: { threshold: 3, unit: "days" }
+
+# Passo seguinte, como configurado no chain (NAO e promessa de aprovacao)
+next_step:
+  name: "$100K High Stakes - 2"
+  profit_target: { value: 5000.0, unit: "currency" }
+
+# ---------------------------------------------------------------
+# Interpretacoes conservadoras (a API nao expoe a base de calculo).
+# Onde havia ambiguidade, escolhemos SEMPRE o lado mais restritivo.
+# ---------------------------------------------------------------
+interpretation:
+  # A doc do conector diz que o motor de enforcement arrasta a perda
+  # maxima a partir do high-water mark de FIM DE DIA - um piso que
+  # nenhum dashboard mostra. Trailing e a leitura segura.
+  trailing_total_loss: true
+
+  # "4 percent" sem base declarada. Aplicamos o MENOR dos dois limites:
+  #   4% do saldo inicial  E  4% do saldo de abertura do dia.
+  daily_loss_basis: "stricter_of_initial_and_day_start"
+
+  # Um dia conta como lucrativo acima deste lucro liquido.
+  # 0.0 e a leitura literal; usamos um piso operacional no governor.
+  profitable_day_min_profit: 0.0

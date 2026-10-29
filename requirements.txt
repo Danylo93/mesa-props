@@ -1,0 +1,15 @@
+# nucleo (rules.py, risk.py, montecarlo.py nao precisam de nada alem destes)
+pandas>=2.0
+numpy>=1.24
+
+# backtest proprio e carga de dados
+# (dukascopy.py usa so a stdlib: lzma, struct, subprocess)
+
+# validacao independente no engine do NautilusTrader
+nautilus_trader>=1.231
+
+# testes
+pytest>=7.0
+
+# execucao real na conta The5ers - SO funciona em Windows
+# MetaTrader5>=5.0.45
