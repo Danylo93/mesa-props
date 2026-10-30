@@ -7,6 +7,31 @@ nanossegundos e paridade de codigo entre backtest e live. Os outros sao
 cripto-only (Freqtrade, Jesse, Hummingbot, CCXT, Eliza), acoes + LLM
 (AI Hedge Fund) ou pesquisa em RL (FinRL).
 
+ATENCAO - ESTE ADAPTADOR NAO ESTA VALIDADO. NAO USE OS NUMEROS DELE.
+
+Duas tentativas de caminho de execucao, as duas erradas:
+
+  1. bracket (sl_trigger_price/tp_price): o motor REJEITA as ordens
+     reduce-only em varios casos e a posicao fica SEM protecao - uma
+     ficou aberta 16 meses e "ganhou" 8 192 USD.
+  2. saida gerida na barra com close_all_positions(): e ordem A MERCADO.
+     Quando a barra toca o stop, a posicao nao fecha NO stop, fecha no
+     preco da barra seguinte. Em mercado reversivo, tocar o stop e voltar
+     vira VITORIA - a taxa de acerto sobe para 55-72% e todo par "bate"
+     os +10 000 do alvo. E artefato da premissa, nao resultado.
+
+O certo e ordens STOP_MARKET e LIMIT reduce-only, descansando na venue,
+submetidas DEPOIS do preenchimento da entrada. Nao esta feito.
+
+A conclusao do repo NAO depende disto: a bancada de pesquisa
+(research.py) avalia sinais direto sobre OHLC, varrendo stop e alvo barra
+a barra, sem motor, sem ordens e sem estado de posicao. E de la que vem o
+resultado de "sem vantagem", e ele e independente dos dois backtests.
+
+O contraste vale como licao: a MESMA estrategia da -5 715 USD com saida
+pessimista (backtest.py) e +10 000 com saida ingenua (aqui). A diferenca
+entre "funciona" e "nao funciona" estava inteira na premissa de saida.
+
 O que Nautilus NAO faz: falar com MetaTrader 5. Nao existe adaptador MT5.
 Entao o desenho e:
 
@@ -74,6 +99,19 @@ class The5ersStrategy(Strategy):
         self._gov = RiskGovernor(self._engine, RiskLimits(
             risk_per_trade_pct=config.risk_per_trade_pct))
         self._day = None
+        # Stop/alvo geridos AQUI, nao por bracket. Motivo: se uma ordem do
+        # bracket e rejeitada, a posicao fica sem protecao e a estrategia
+        # trava esperando um on_position_closed que nunca vem - foi
+        # exatamente isso que aconteceu (posicao aberta por 16 meses).
+        # Gerir na barra e mais simples e espelha src/the5ers/backtest.py.
+        self._stop: float | None = None
+        self._target: float | None = None
+        self._side: int = 0
+        # Entre submeter a ordem e a posicao aparecer no portfolio existe
+        # uma barra em que `is_flat` ainda e True. Sem esta flag a
+        # reconciliacao lia isso como "fechou", zerava o estado e abria de
+        # novo - empilhando posicao em netting e inventando lucro.
+        self._awaiting_fill: bool = False
 
     # ------------------------------------------------------------- ciclo
 
@@ -83,7 +121,10 @@ class The5ersStrategy(Strategy):
             self.log.error(f"instrumento nao encontrado: {self.config.instrument_id}")
             self.stop()
             return
-        self.request_bars(self.config.bar_type)
+        # Sem request_bars: em backtest as barras chegam pelo stream, e em
+        # live a propria janela `_bars` faz o aquecimento (config.warmup).
+        # A assinatura de request_bars muda entre versoes do Nautilus e nao
+        # vale acoplar a estrategia a ela por um aquecimento que ja existe.
         self.subscribe_bars(self.config.bar_type)
         self._engine.open_day(self._today())
         self._gov.on_day_open()
@@ -137,9 +178,32 @@ class The5ersStrategy(Strategy):
             self._gov.flattened_today = True
             return
 
-        if self.portfolio.is_net_long(self.config.instrument_id) or \
-           self.portfolio.is_net_short(self.config.instrument_id):
-            return  # ja posicionado: a saida e pela bracket
+        sym = self.config.instrument_id.symbol.value.replace("/", "")[:6]
+        flat = self.portfolio.is_flat(self.config.instrument_id)
+
+        # Estado do governor vem do PORTFOLIO, nunca de contabilidade
+        # paralela: assim nao existe o estado "travado" que impedia
+        # qualquer entrada nova depois de uma ordem rejeitada.
+        if not flat:
+            self._awaiting_fill = False
+        if flat and not self._awaiting_fill and sym in self._gov.open_symbols:
+            self._gov.register_close(sym)
+            self._stop = self._target = None
+            self._side = 0
+
+        # saida gerida na barra: stop antes do alvo (pessimista)
+        if not flat and self._stop is not None:
+            hi, lo = float(bar.high), float(bar.low)
+            hit_stop = (lo <= self._stop) if self._side > 0 else (hi >= self._stop)
+            hit_tgt = (hi >= self._target) if self._side > 0 else (lo <= self._target)
+            if hit_stop or hit_tgt:
+                self.close_all_positions(self.config.instrument_id)
+                self._stop = self._target = None
+                self._side = 0
+            return
+
+        if not flat:
+            return
 
         df = add_indicators(self._frame(), self._params)
         sig = generate_signals(df, self._params)
@@ -147,10 +211,8 @@ class The5ersStrategy(Strategy):
         if side_i == 0:
             return
 
-        sym = self.config.instrument_id.symbol.value.replace("/", "")[:6]
         dec = self._gov.can_open(sym, equity)
         if not dec:
-            self.log.info(f"sinal vetado: {dec.reason}")
             return
 
         atr = float(df["atr"].iloc[-1])
@@ -164,20 +226,16 @@ class The5ersStrategy(Strategy):
 
         side = OrderSide.BUY if side_i > 0 else OrderSide.SELL
         qty = self.instrument.make_qty(Decimal(str(round(lots * 100_000))))
-        entry = self.instrument.make_price(px)
-        sl = self.instrument.make_price(px - side_i * stop_dist)
-        tp = self.instrument.make_price(px + side_i * stop_dist * self._params.rr)
-
-        order = self.order_factory.bracket(
+        self.submit_order(self.order_factory.market(
             instrument_id=self.config.instrument_id,
             order_side=side,
             quantity=qty,
-            sl_trigger_price=sl,
-            tp_price=tp,
-        )
-        self.submit_order_list(order)
+        ))
+        self._awaiting_fill = True
+        self._side = side_i
+        self._stop = px - side_i * stop_dist
+        self._target = px + side_i * stop_dist * self._params.rr
         self._gov.register_open(sym)
-        self.log.info(f"{side.name} {lots} lotes @ {entry} SL={sl} TP={tp}")
 
     # ------------------------------------------------------------- estado
 
@@ -193,6 +251,12 @@ class The5ersStrategy(Strategy):
         return self._engine.balance
 
     def on_position_closed(self, event) -> None:
+        # Atalho util, mas NAO e a fonte de verdade: on_bar reconcilia
+        # contra o portfolio a cada barra, entao perder este evento nao
+        # trava mais a estrategia.
         sym = self.config.instrument_id.symbol.value.replace("/", "")[:6]
         self._gov.register_close(sym)
+        self._stop = self._target = None
+        self._side = 0
+        self._awaiting_fill = False
         self._engine.balance = self._equity()

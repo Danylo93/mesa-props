@@ -141,7 +141,8 @@ src/the5ers/
   backtest.py                backtest orientado a eventos, premissas pessimistas
   montecarlo.py              P(aprovado) por bootstrap dos trades
   dukascopy.py               candles H1 reais (formato .bi5 decodificado aqui)
-  nautilus_strategy.py       adaptador NautilusTrader
+  research.py                bancada de pesquisa de sinais (sem motor)
+  nautilus_strategy.py       adaptador NautilusTrader -- NAO VALIDADO
   live_mt5.py                guarda-regras para a conta real no MT5
 scripts/fetch_data.py        baixa os dados (Dukascopy, multi-passada)
 scripts/build_csv.py         reconstroi os CSVs do cache ja baixado
@@ -149,6 +150,11 @@ scripts/run_backtest.py      backtest + varredura + walk-forward + Monte Carlo
 scripts/diagnose.py          normal vs invertido vs aleatorio  <- o teste decisivo
 scripts/required_edge.py     que taxa de acerto aprova, por Monte Carlo
 scripts/sync_rules.py        documenta as chamadas de API que geraram o YAML
+scripts/scan_signals.py      varre as 8 hipoteses de sinal
+scripts/scan_structure.py    que estrutura de trade salva cada sinal
+scripts/verify_edge.py       teste t + Bonferroni no candidato
+scripts/test_ensemble.py     confluencia multi-sinal
+scripts/run_nautilus.py      motor Nautilus -- NAO VALIDADO (secao 7)
 tests/test_rules.py          29 testes do motor de regras
 ```
 
@@ -244,7 +250,101 @@ caminhos**, porque o custo te empurra contra o piso que arrasta. A meta prática
 
 ---
 
-## 6. Uso
+## 6. Busca por vantagem: 8 hipóteses, nenhuma sobreviveu
+
+Depois de medir que o pullback era ruído, a resposta certa não é mexer em
+parâmetro até o backtest ficar bonito — isso é p-hacking e produz sistema que
+perde dinheiro de verdade. Testei **hipóteses diferentes**, cada uma com razão
+econômica, no mesmo tribunal: corte treino/teste **no tempo**, baseline
+aleatório na mesma frequência, consistência entre pares.
+
+Resultado fora da amostra, média dos 5 pares (`scripts/scan_signals.py`):
+
+| Sinal | avg R | vs aleatório | pares + |
+|---|---|---|---|
+| asia_fade | −0,0148 | **+0,0161** | 3/5 |
+| bb_fade / meanrev_z | −0,0379 | +0,0157 | 3/5 |
+| london_breakout | −0,0471 | +0,0049 | 4/5 |
+| rsi_extreme | −0,0869 | −0,0454 | 3/5 |
+| trend_pullback | −0,1303 | −0,0529 | 1/5 |
+| momentum | −0,1801 | −0,0758 | 1/5 |
+| vol_squeeze | −0,1204 | −0,0907 | 0/5 |
+| inside_break | −0,1977 | −0,1396 | 1/5 |
+
+A família de **reversão à média bate o sorteio** — confirma que FX H1 é
+reversivo, não tendencial. Mas **todos continuam negativos em absoluto**: a
+vantagem (~+0,016 R) é menor que o custo (~0,07 R). `bb_fade` e `meanrev_z` deram
+números idênticos porque são a mesma fórmula; foram 8 hipóteses, não 9.
+
+### O candidato que quase passou
+
+Varrendo estrutura de trade (stop 1,5–4 ATR × alvo 0,5–1,5 R, escolhida **só no
+treino**), o `london_breakout` com stop 4 ATR e alvo 0,5 R deu **avg R +0,0292
+fora da amostra** — positivo líquido. Submetido ao teste estatístico
+(`scripts/verify_edge.py`):
+
+| | |
+|---|---|
+| n | 1 086 |
+| avg R | +0,0292 |
+| t | 1,49 |
+| p bruto | 0,137 |
+| **p após Bonferroni (36 testes)** | **1,000** |
+| pares positivos | 3/5 |
+
+**Reprovado nos três critérios.** Era o melhor de 36 sorteios, não uma vantagem.
+
+### Combinar os sinais (a ideia do AI Hedge Fund) não resolve
+
+Vários "analistas" votando, operando só na confluência — `scripts/test_ensemble.py`:
+**0 de 8 combinações** com avg R positivo. `voto3` (3+ concordando) chega a
+−0,34 R. Confluência não cria informação que os componentes não têm.
+
+---
+
+## 7. O estado do NautilusTrader neste repo
+
+Preciso ser exato aqui, porque é fácil dar a impressão errada.
+
+**O NautilusTrader é a escolha de framework** e o adaptador existe
+(`src/the5ers/nautilus_strategy.py`): instala, instancia, submete ordens e
+preenche. **Mas o caminho de saída está errado e os números dele não prestam.**
+
+Duas tentativas, as duas furadas:
+
+1. **Bracket** (`sl_trigger_price`/`tp_price`) — o motor rejeita as ordens
+   reduce-only em vários casos e a posição fica **sem proteção**. Uma ficou
+   aberta 16 meses e "ganhou" 8 192 USD.
+2. **Saída gerida na barra** com `close_all_positions()` — é ordem **a mercado**.
+   Quando a barra toca o stop, a posição não fecha *no stop*, fecha no preço da
+   barra seguinte. Em mercado reversivo, tocar o stop e voltar vira **vitória**:
+   acerto sobe para 55–72% e **todo par "bate" os +10 000**.
+
+O certo é ordens `STOP_MARKET` e `LIMIT` reduce-only descansando na venue,
+submetidas depois do preenchimento da entrada. **Não está feito.**
+
+### O contraste vale como lição
+
+A **mesma** estratégia, nos **mesmos** dados:
+
+| Premissa de saída | Resultado |
+|---|---|
+| pessimista (`backtest.py`: stop ganha do alvo, spread, slippage) | **−5 715 USD** |
+| ingênua (`run_nautilus.py`: fecha a mercado na barra seguinte) | **+10 000 USD** |
+
+A diferença entre "funciona" e "não funciona" estava **inteira na premissa de
+saída**. É por isso que backtest otimista não vale nada.
+
+### Por que a conclusão não depende disso
+
+A bancada de pesquisa (`src/the5ers/research.py`) avalia sinais **direto sobre
+OHLC**, varrendo stop e alvo barra a barra — sem motor, sem ordens, sem estado de
+posição. O resultado de "sem vantagem" vem de lá e é **independente dos dois
+backtests**.
+
+---
+
+## 8. Uso
 
 ```bash
 pip install -r requirements.txt
@@ -252,6 +352,11 @@ python scripts/fetch_data.py 18        # candles H1 (Dukascopy)
 python scripts/run_backtest.py         # backtest + varredura + WF + Monte Carlo
 python scripts/diagnose.py             # normal vs invertido vs aleatorio
 python scripts/required_edge.py        # que vantagem e preciso ter
+python scripts/scan_signals.py         # varre 8 hipoteses de sinal
+python scripts/scan_structure.py       # que estrutura de trade salva cada uma
+python scripts/verify_edge.py          # teste t + Bonferroni no candidato
+python scripts/test_ensemble.py        # confluencia (ideia do AI Hedge Fund)
+python scripts/run_nautilus.py EURUSD  # motor Nautilus -- NAO VALIDADO
 python -m pytest tests/ -q             # 29 testes do motor de regras
 ```
 
@@ -268,7 +373,7 @@ continua sendo sua, de propósito.
 
 ---
 
-## 7. O que isto não é
+## 9. O que isto não é
 
 - **A estratégia de referência não funciona** — medido, não suposto (seção 5).
   Ela está aqui como alvo de teste e exemplo de como ligar sinal + risco + regras,
