@@ -48,6 +48,11 @@ class Outcome:
     r: float
     reason: str
     bars: int
+    i_entry: int = -1      # barra da entrada, para simulacao de carteira
+    i_exit: int = -1       # barra da saida
+    risk_price: float = 0.0   # distancia do stop em PRECO
+    entry_px: float = 0.0
+    side: int = 0
 
 
 def run_setups(df: pd.DataFrame, setups: list[Setup], pair: str,
@@ -68,8 +73,10 @@ def run_setups(df: pd.DataFrame, setups: list[Setup], pair: str,
             continue
         r_val, why, bars = None, "tempo", 0
         end = min(s.i_entry + cm.max_bars, n)
+        j_exit = end - 1
         for j in range(s.i_entry, end):
             bars = j - s.i_entry + 1
+            j_exit = j
             if side > 0:
                 if lo[j] <= s.stop:
                     r_val, why = -(1.0), "stop"; break
@@ -82,7 +89,10 @@ def run_setups(df: pd.DataFrame, setups: list[Setup], pair: str,
                     r_val, why = abs(s.target - entry) / risk, "alvo"; break
         if r_val is None:
             r_val = (cl[end - 1] - entry) * side / risk
-        out.append(Outcome(r=r_val - cost / risk, reason=why, bars=bars))
+            j_exit = end - 1
+        out.append(Outcome(r=r_val - cost / risk, reason=why, bars=bars,
+                           i_entry=s.i_entry, i_exit=j_exit,
+                           risk_price=risk, entry_px=entry, side=side))
     return out
 
 

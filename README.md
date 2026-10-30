@@ -111,7 +111,88 @@ Inclusive o vídeo. Inclusive este repositório.
 
 ---
 
-## 5. O que isso significa para a conta de 100K
+## 5. Teste prático: aprovaria? em quanto tempo?
+
+Backtest de **carteira** — 5 pares, uma conta só, risco compartilhado, as regras
+reais da The5ers no circuito (alvo 10 000, perda diária 4%, perda total 8 000
+**arrastando** pelo fechamento, 3 dias lucrativos).
+
+### O que aconteceu nos 17 meses de dado real
+
+| Config | risco | status | lucro | trades | dias lucr. | travou em |
+|---|---|---|---|---|---|---|
+| Livro | 0,35% | não aprovou | **−6 276** | 45 | 7 | 2025-11-17 |
+| Livro | 1,00% | não aprovou | −4 954 | 20 | 5 | 2025-07-08 |
+| Ajustada | 0,35% | não aprovou | **−1 037** | 102 | 26 | — |
+| Ajustada | 1,00% | não aprovou | +701 | 32 | 9 | 2025-11-21 |
+
+Nenhuma chega perto de +10 000. E surgiu um terceiro desfecho que eu não
+esperava: **"travou"**. A conta não viola regra nenhuma — o piso que arrasta,
+somado à folga do governor, simplesmente a deixa **sem espaço para arriscar**.
+Ela não quebra; ela para de poder operar. Na config do livro isso acontece entre
+o 2º e o 7º mês.
+
+### Em quanto tempo? (Monte Carlo, 8 000 caminhos, horizonte de 5 anos)
+
+Um backtest dá **um** caminho. "Quanto tempo leva" é pergunta de distribuição.
+
+**Config ajustada** (a mais favorável):
+
+| risco | aprovou | **travou** | quebrou | mediana | p25–p75 |
+|---|---|---|---|---|---|
+| 0,25% | 8,9% | 66,3% | **0,0%** | 38,6 meses | 27–48 |
+| 0,35% | 16,2% | 80,4% | **0,0%** | 25,6 meses | 18–36 |
+| 0,50% | 19,9% | 80,1% | **0,0%** | 13,6 meses | 9–20 |
+| 1,00% | 22,8% | 77,2% | **0,0%** | **3,8 meses** | 2–6 |
+
+Três coisas saltam:
+
+**1. `quebrou` é 0,0% em toda linha.** A camada de risco nunca deixa violar
+regra. Isso é o sistema funcionando: você não perde a conta por infração, você
+perde por travamento.
+
+**2. Mais risco não melhora as chances — muda a velocidade.** De 0,25% para
+1,00%, a aprovação vai de 8,9% para 22,8% enquanto o tempo cai de 38 para 4
+meses. É exatamente o que se espera de vantagem ≈ zero: o resultado é quase
+cara-ou-coroa, e o risco só define quão rápido a moeda cai.
+
+**3. O desfecho dominante é travar (66–80%), não aprovar.**
+
+### A régua que calibra tudo
+
+E se a vantagem existisse? Mesma frequência, mesma variância, risco 0,5%:
+
+| avg R | aprovou | mediana |
+|---|---|---|
+| **0,00** (cara-ou-coroa) | **25,1%** | 13,8 meses |
+| +0,05 | 38,7% | 13,4 meses |
+| +0,10 | 54,8% | 13,3 meses |
+| +0,20 | 81,5% | 11,5 meses |
+| +0,30 | 95,4% | 9,2 meses |
+
+Duas leituras que mudam como se olha para qualquer estratégia de mesa:
+
+> **Vantagem não te faz chegar mais rápido — te faz chegar.** A mediana mal se
+> move (13,8 → 9,2 meses), mas a probabilidade salta de 25% para 95%. O tempo é
+> ditado pela frequência e pelo risco; a vantagem decide *se* você chega.
+
+> **25% é o piso da sorte.** Mesmo sem vantagem nenhuma, 1 em cada 4 caminhos
+> aprova — a variância sozinha carrega a conta até +10% antes do piso alcançá-la.
+> Logo, **qualquer coisa abaixo de ~25% de aprovação é pior que jogar moeda.**
+> O Holy Grail mediu 8,9% a 22,8%. Está no piso da sorte ou abaixo dele.
+
+### Resposta direta
+
+**Não aprova de forma confiável.** No melhor cenário medido (config ajustada,
+1% de risco — risco alto), são **22,8% de chance em ~4 meses**, contra 77% de
+travar. Nos 17 meses de dado real, nenhuma configuração passou de +701 USD.
+
+E a pergunta "em quanto tempo" é, em si, mal formulada aqui: o desfecho
+dominante não é *aprovar mais tarde*, é **não aprovar**.
+
+---
+
+## 6. O que isso significa para a conta de 100K
 
 Três fatos que não dependem de opinião:
 
@@ -128,7 +209,7 @@ isso. Essa é a resposta honesta, e ela é diferente de "não funciona".
 
 ---
 
-## 6. Estrutura
+## 7. Estrutura
 
 ```
 holygrail/
@@ -136,10 +217,13 @@ holygrail/
   setup.py         maquina de estados do Holy Grail
   evaluate.py      R-multiplos com custo + controle aleatorio
   resample.py      H1 -> H4 / D1 (dia de forex fecha 21:00 UTC)
+  the5ers.py       regras da conta 100K + dimensionamento
 run.py             roda o setup nos majors
 compare_tf.py      compara H1 / H4 / D1
 tune_h4.py         ajuste com treino/teste e Bonferroni
 power.py           quanta amostra faltou
+simulate.py        backtest de CARTEIRA com as regras da mesa
+tempo_aprovacao.py Monte Carlo: aprova? em quanto tempo?
 tests/             19 testes
 ```
 
@@ -155,7 +239,7 @@ tests/             19 testes
 
 ---
 
-## 7. Uso
+## 8. Uso
 
 ```bash
 pip install -r requirements.txt
@@ -163,6 +247,9 @@ python run.py            # Holy Grail em H1, por par
 python compare_tf.py     # H1 vs H4 vs D1
 python tune_h4.py        # ajuste com disciplina treino/teste
 python power.py          # analise de poder
+python simulate.py       # carteira com as regras da mesa
+python simulate.py --tuned
+python tempo_aprovacao.py   # aprova? em quanto tempo?
 python -m pytest tests/ -q
 ```
 
@@ -170,7 +257,7 @@ Os dados (`data/h1/*.csv`, candles H1 da Dukascopy) não estão versionados.
 
 ---
 
-## 8. Se for levar adiante
+## 9. Se for levar adiante
 
 A ordem que faz sentido, do mais barato ao mais caro:
 
